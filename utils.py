@@ -1,9 +1,12 @@
 import pandas as pd
+import json
 
 
 def update_df_style(df):
     df = df.copy()
     df.loc["Total"] = df.sum(numeric_only=True)
+    # Remove NA as Empty String
+    df = df.fillna("")
     # Add proper number formatting if columns are numeric
     for col in df.select_dtypes(include="number").columns:
         df[col] = df[col].map("{:,.0f}".format)
@@ -108,3 +111,30 @@ def get_default_allocation(risk_profile, only_equity):
                 "Debt": 50,
                 "Gold": 5,
             }
+
+
+def load_user_data():
+    try:
+        with open("user_data.json", "r") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+
+
+def save_user_data(data):
+    with open("user_data.json", "w") as f:
+        json.dump(data, f, indent=4)
+
+
+def load_user_profile(user_id):
+    user_data = load_user_data()
+    return user_data.get(user_id, {})
+
+
+def save_user_profile(user_id, profile):
+    if not user_id:
+        return False
+    user_data = load_user_data()
+    user_data[user_id] = profile
+    save_user_data(user_data)
+    return True

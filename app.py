@@ -1,21 +1,44 @@
+from altair import value
 import streamlit as st
 import pandas as pd
 
 from utils import (
+    load_user_profile,
+    save_user_profile,
     update_df_style,
     calculate_additional_investment,
     get_default_allocation,
 )
+
+# -----------------
+# Main Title - Prep
+# -----------------
+
+    
 
 
 # -----------------
 # Sidebar
 # -----------------
 
+# ======================
+# Session Initialization
+# ======================
+
+
+# User profile
+if "user_id" not in st.session_state:
+    st.session_state.user_id = None
 
 # Initialize session state for inputs
 if "total_investable" not in st.session_state:
     st.session_state.total_investable = 100000.0
+
+# Duration In Months
+if "duration_months" not in st.session_state:
+    st.session_state.duration_months = 1
+
+# Existing Balances
 if "existing_balances" not in st.session_state:
     st.session_state.existing_balances = {
         "Large Cap": 0.0,
@@ -25,8 +48,33 @@ if "existing_balances" not in st.session_state:
         "Debt": 0.0,
     }
 
+if "risk_profile" not in st.session_state:
+    st.session_state.risk_profile = "High Risk"
+
+
+# ======================
 # Sidebar Inputs
-st.sidebar.header("Portfolio Inputs")
+# ======================
+
+
+# User Profile
+st.sidebar.subheader("User Profile")
+st.session_state.user_id = st.sidebar.text_input("Enter User ID:", st.session_state.user_id, placeholder="User ID to persist profile data")
+
+# Load user profile data
+if st.session_state.user_id:
+    user_data = load_user_profile(st.session_state.user_id)
+    if user_data and "existing_balances" in user_data:
+        st.session_state.existing_balances = user_data["existing_balances"]
+    if user_data and "total_investable" in user_data:
+        st.session_state.total_investable = user_data["total_investable"]
+    if user_data and "duration_months" in user_data:
+        st.session_state.duration_months = user_data["duration_months"]
+    if user_data and "allocations" in user_data:
+        st.session_state.allocations = user_data["allocations"]
+
+# Portfolio Inputs
+st.sidebar.subheader("Portfolio Inputs")
 st.session_state.total_investable = st.sidebar.number_input(
     "Enter Total Investable Amount (₹):",
     min_value=0.0,
@@ -34,9 +82,15 @@ st.session_state.total_investable = st.sidebar.number_input(
     value=st.session_state.total_investable,
 )
 
+st.session_state.duration_months = st.sidebar.number_input(
+    "Enter Duration In Months:",
+    min_value=1,
+    step=1,
+    value=st.session_state.duration_months,
+)
+
 # Horizontal rule for better separation
 st.sidebar.markdown("---")
-
 
 # Input existing balances for each asset class
 st.sidebar.subheader("Enter Existing Balances (₹):")
@@ -56,7 +110,7 @@ st.sidebar.subheader("Set Target Allocation Percentages:")
 
 
 # Dropdown for Risk Profile
-risk_profile = st.sidebar.selectbox(
+risk_profile = st.session_state.risk_profile = st.sidebar.selectbox(
     "Select Risk Profile:", ["High Risk", "Moderate Risk", "Low Risk"]
 )
 
@@ -152,9 +206,11 @@ rebalance_df = pd.DataFrame(
         "Asset Class": target_amounts.keys(),
         "Target Amount (₹)": target_amounts.values(),
         "Existing Balance (₹)": st.session_state.existing_balances.values(),
-        "To Be Invested/Rebalanced (₹)": rebalancing_amounts.values(),
+        "New Investment (₹)": rebalancing_amounts.values(),
+        "SIP (₹)": [round(amount / st.session_state.duration_months) for amount in rebalancing_amounts.values()],
     }
 )
+rebalance_df['New Allocation (%)'] = rebalance_df['New Investment (₹)'] / st.session_state.total_investable * 100
 st.table(update_df_style(rebalance_df))
 
 amount_to_sell = sum(amount for amount in rebalancing_amounts.values() if amount < 0)
@@ -163,6 +219,18 @@ if amount_to_sell < 0:
 else:
     st.success(f"Portfolio is balanced as per target allocations!")
 
+# Persist user profile data
+user_data = {
+    "existing_balances": st.session_state.existing_balances,
+    "total_investable": st.session_state.total_investable,
+    "duration_months": st.session_state.duration_months,
+    "allocations": st.session_state.allocations,
+}
+# Button to click Save
+if st.button("Save User Profile"):
+    res = save_user_profile(st.session_state.user_id, user_data)
+    if res:
+        st.success("User Profile Saved Successfully!")
 
 # =====================
 # Additional Investment

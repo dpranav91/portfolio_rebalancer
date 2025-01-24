@@ -1,0 +1,20 @@
+{
+    "dummy": {
+        "existing_balances": {
+            "Large Cap": 0.0,
+            "Mid Cap": 0.0,
+            "Small Cap": 0.0,
+            "Gold": 0.0,
+            "Debt": 0.0
+        },
+        "total_investable": 100000.0,
+        "duration_months": 1,
+        "allocations": {
+            "Large Cap": 40,
+            "Mid Cap": 30,
+            "Small Cap": 20,
+            "Debt": 5,
+            "Gold": 5
+        }
+    }
+}

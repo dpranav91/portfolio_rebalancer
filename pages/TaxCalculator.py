@@ -43,7 +43,6 @@ TAX_DATA = {
 }
 
 
-
 def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
     rows = []
     total_tax = surcharge = cess = cumulative_tax = final_tax = 0
@@ -125,7 +124,7 @@ def tax_calculator_page():
         st.markdown("---")
 
         st.markdown(f"## Income Tax Calculation for {year} Tax Slabs")
-        tax_data  = TAX_DATA[year]
+        tax_data = TAX_DATA[year]
         slabs = tax_data["slabs"]
         tax_rebate_limit = tax_data.get("tax_rebate_limit", 0)
         standard_deduction = tax_data.get("standard_deduction", 0)
@@ -152,14 +151,12 @@ def tax_calculator_page():
             final_tax = final_row["Final Tax After Surcharge and Cess (₹)"]
             final_tax_float = float(final_tax.replace("₹", "").replace(",", ""))
             result[year] = final_tax_float
-            st.success(
-                f"Your total tax liability under New Tax regime is: {final_tax}"
-            )
-        
+            st.success(f"Your total tax liability under New Tax regime is: {final_tax}")
+
         # Do not proceed if the flag to compare is not set
         if not should_compare:
             return
-        
+
     # Add a separator
     st.markdown("---")
 
@@ -174,8 +171,6 @@ def tax_calculator_page():
         st.success(
             f"Your total tax benefit from {year} to {next_year} tax slab change is: ₹{benefit:,.0f}"
         )
-
-
 
 
 tax_calculator_page()

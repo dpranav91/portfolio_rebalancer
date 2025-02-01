@@ -1,22 +1,14 @@
 import streamlit as st
 import pandas as pd
 
-# Define tax slabs for 2024 and 2025
+# Wide layout
+st.set_page_config(layout="wide", page_title="Income Tax Calculator")
+
+LAKH = 100000
+CRORE = 100 * LAKH
+
+# Define tax slabs in Descending order
 TAX_DATA = {
-    "2024": {
-        "slabs": [
-            {"range": (0, 400000), "rate": 0},
-            {"range": (400001, 800000), "rate": 5},
-            {"range": (800001, 1200000), "rate": 10},
-            {"range": (1200001, 1600000), "rate": 15},
-            {"range": (1600001, 2000000), "rate": 20},
-            {"range": (2000001, 2400000), "rate": 25},
-            {"range": (2400001, 5000000), "rate": 30},
-            {"range": (5000001, float("inf")), "rate": 30, "surcharge": 30},
-        ],
-        "standard_deduction": 75000,
-        "tax_rebate_limit": 1200000,
-    },
     "2025": {
         "slabs": [
             {"range": (0, 400000), "rate": 0},
@@ -26,10 +18,27 @@ TAX_DATA = {
             {"range": (1600000, 2000000), "rate": 20},
             {"range": (2000000, 2400000), "rate": 25},
             {"range": (2400000, 5000000), "rate": 30},
-            {"range": (5000000, float("inf")), "rate": 30, "surcharge": 30},
+            {"range": (5000000, 1 * CRORE), "rate": 30, "surcharge": 10},
+            {"range": (1 * CRORE, 2 * CRORE), "rate": 30, "surcharge": 15},
+            {"range": (2 * CRORE, float("inf")), "rate": 30, "surcharge": 25},
         ],
         "standard_deduction": 75000,
         "tax_rebate_limit": 1200000,
+    },
+    "2024": {
+        "slabs": [
+            {"range": (0, 300000), "rate": 0},
+            {"range": (300000, 700000), "rate": 5},
+            {"range": (700000, 1000000), "rate": 10},
+            {"range": (1000000, 1200000), "rate": 15},
+            {"range": (1200000, 1500000), "rate": 20},
+            {"range": (1500000, 5000000), "rate": 30},
+            {"range": (5000000, 1 * CRORE), "rate": 30, "surcharge": 10},
+            {"range": (1 * CRORE, 2 * CRORE), "rate": 30, "surcharge": 15},
+            {"range": (2 * CRORE, float("inf")), "rate": 30, "surcharge": 25},
+        ],
+        "standard_deduction": 75000,
+        "tax_rebate_limit": 700000,
     },
 }
 
@@ -58,12 +67,20 @@ def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
             cess = (cumulative_tax + surcharge) * 4 / 100
             final_tax = cumulative_tax + surcharge + cess
 
+            # Apply tax rebate if applicable
+            tax_rebate = 0
+            if tax_rebate_limit and taxable_income <= tax_rebate_limit:
+                tax_rebate = -min(final_tax, tax_rebate_limit)
+                final_tax = 0
+                surcharge = cess = 0
+
             rows.append(
                 {
                     "Income Level": f"₹{lower_limit:,} - ₹{upper_limit if upper_limit != float('inf') else taxable_income:,}",
                     "Slab Rate (%)": f"{rate}%",
                     "Total Tax for Slab (₹)": f"₹{slab_tax:,.0f}",
                     "Overall Tax Cumulative (₹)": f"₹{cumulative_tax:,.0f}",
+                    "Rebate (₹)": tax_rebate,
                     "Surcharge (₹)": f"₹{surcharge:,.0f}",
                     "H/E Cess (₹)": f"₹{cess:,.0f}",
                     "Final Tax After Surcharge and Cess (₹)": f"₹{final_tax:,.0f}",
@@ -76,56 +93,89 @@ def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
     return rows
 
 
-# Streamlit app
-st.title("Income Tax Calculator with Table View")
+def tax_calculator_page():
+    # Streamlit app
+    st.title("Income Tax Calculator")
 
-# Dropdown to select the year
-year = st.selectbox("Select Tax Slab Year", ["2025", "2024"], index=0)
+    # Input field for annual income
+    income = st.number_input(
+        "Enter your annual income",
+        min_value=0.0,
+        format="%.0f",
+        value=1200000.0,
+        step=50000.0,
+    )
 
-# Input field for annual income
-income = st.number_input(
-    "Enter your annual income",
-    min_value=0.0,
-    format="%.0f",
-    value=1200000.0,
-    step=50000.0,
-)
+    # Deductions
+    employer_nps_contribution = st.number_input(
+        "Enter Annual Employer NPS contribution 80CCD(2) (₹)",
+        min_value=0.0,
+        format="%.0f",
+        value=0.0,
+        step=5000.0,
+    )
 
-# Deductions
-employer_nps_contribution = st.number_input(
-    "Enter Annual Employer NPS contribution 80CCD(2) (₹)",
-    min_value=0.0,
-    format="%.0f",
-    value=0.0,
-    step=5000.0,
-)
+    # Flag to check where to compare the tax benefit
+    should_compare = st.checkbox("Compare Tax Benefit", value=False)
 
-st.write(f"Standard Deduction: ₹{employer_nps_contribution:,.0f}")
+    result = {}
 
-tax_data  = TAX_DATA[year]
-slabs = tax_data["slabs"]
-tax_rebate_limit = tax_data.get("tax_rebate_limit", 0)
-standard_deduction = tax_data.get("standard_deduction", 0)
+    for year in TAX_DATA.keys():
+        # Add a separator
+        st.markdown("---")
 
-# Apply standard deduction
-taxable_income = max(0, income - employer_nps_contribution - standard_deduction)
+        st.markdown(f"## Income Tax Calculation for {year} Tax Slabs")
+        tax_data  = TAX_DATA[year]
+        slabs = tax_data["slabs"]
+        tax_rebate_limit = tax_data.get("tax_rebate_limit", 0)
+        standard_deduction = tax_data.get("standard_deduction", 0)
 
-st.markdown(f"##### Taxable Income: ₹{taxable_income:,.0f}")
+        # Calculate Taxable Income
+        st.write(f"Standard Deduction: ₹{standard_deduction:,.0f}")
+        taxable_income = max(0, income - employer_nps_contribution - standard_deduction)
 
-# Calculate tax when button is clicked
-if 1 or st.button("Calculate Tax"):
-    tax_table_data = calculate_tax_table(taxable_income, slabs, tax_rebate_limit)
+        st.markdown(f"##### Taxable Income: ₹{taxable_income:,.0f}")
 
-    # Convert tax table data to DataFrame for display
-    df = pd.DataFrame(tax_table_data)
+        # Calculate tax when button is clicked
+        tax_table_data = calculate_tax_table(taxable_income, slabs, tax_rebate_limit)
 
-    # Display the tax table
-    st.subheader(f"Tax Calculation Table for {year}")
-    st.dataframe(df)
+        # Convert tax table data to DataFrame for display
+        df = pd.DataFrame(tax_table_data)
 
-    # Show final tax liability
-    if tax_table_data:
-        final_row = tax_table_data[-1]
+        # Display the tax table
+        st.markdown(f"#### Tax Calculation Table")
+        st.dataframe(df)
+
+        # Show final tax liability
+        if tax_table_data:
+            final_row = tax_table_data[-1]
+            final_tax = final_row["Final Tax After Surcharge and Cess (₹)"]
+            final_tax_float = float(final_tax.replace("₹", "").replace(",", ""))
+            result[year] = final_tax_float
+            st.success(
+                f"Your total tax liability under New Tax regime is: {final_tax}"
+            )
+        
+        # Do not proceed if the flag to compare is not set
+        if not should_compare:
+            return
+        
+    # Add a separator
+    st.markdown("---")
+
+    # Show the Benefit
+    st.write("## Tax Benefit Comparison")
+    tax_years = list(TAX_DATA.keys())
+    for index, year in enumerate(tax_years):
+        if index == 0:
+            continue
+        next_year = tax_years[index - 1]
+        benefit = result[year] - result[next_year]
         st.success(
-            f"Your total tax liability for {year} is: {final_row['Final Tax After Surcharge and Cess (₹)']}"
+            f"Your total tax benefit from {year} to {next_year} tax slab change is: ₹{benefit:,.0f}"
         )
+
+
+
+
+tax_calculator_page()

@@ -42,6 +42,7 @@ TAX_DATA = {
     },
 }
 
+STANDARD_DEDUCTION = 75000
 
 def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
     rows = []
@@ -64,6 +65,7 @@ def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
 
             # Apply health and education cess
             cess = (cumulative_tax + surcharge) * 4 / 100
+
             final_tax = cumulative_tax + surcharge + cess
 
             # Apply tax rebate if applicable
@@ -114,10 +116,18 @@ def tax_calculator_page():
         step=5000.0,
     )
 
+    standard_deduction = st.number_input("Standard Deduction (₹)", value=STANDARD_DEDUCTION)
+
+    # Calculate Taxable Income
+    taxable_income = max(0, income - employer_nps_contribution - standard_deduction)
+
+    st.markdown(f"##### Taxable Income: ₹{taxable_income:,.0f}")
+
     # Flag to check where to compare the tax benefit
     should_compare = st.checkbox("Compare Tax Benefit", value=False)
 
-    result = {}
+    # Store the tax calculation for each year
+    result = {} # {year: tax_liability}
 
     for year in TAX_DATA.keys():
         # Add a separator
@@ -128,12 +138,6 @@ def tax_calculator_page():
         slabs = tax_data["slabs"]
         tax_rebate_limit = tax_data.get("tax_rebate_limit", 0)
         standard_deduction = tax_data.get("standard_deduction", 0)
-
-        # Calculate Taxable Income
-        st.write(f"Standard Deduction: ₹{standard_deduction:,.0f}")
-        taxable_income = max(0, income - employer_nps_contribution - standard_deduction)
-
-        st.markdown(f"##### Taxable Income: ₹{taxable_income:,.0f}")
 
         # Calculate tax when button is clicked
         tax_table_data = calculate_tax_table(taxable_income, slabs, tax_rebate_limit)

@@ -207,7 +207,7 @@ def tax_calculator_page():
             monthly_tax = final_tax_float / 12
             st.info(
                 f"Monthly Tax Liability: ₹{monthly_tax:,.0f}"
-                + _append_suffix(final_tax_float)
+                + _append_suffix(monthly_tax)
             )
 
         # Do not proceed if the flag to compare is not set

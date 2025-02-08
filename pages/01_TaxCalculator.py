@@ -79,9 +79,21 @@ def _append_suffix(value):
     return f" ({number_to_words(value)})"
 
 
+def get_surcharge(taxable_income):
+    if taxable_income > 2 * CRORE:
+        return 25
+    elif taxable_income > 1 * CRORE:
+        return 15
+    elif taxable_income > 50 * LAKH:
+        return 10
+    return 0
+
+
 def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
     rows = []
     total_tax = surcharge = cess = cumulative_tax = final_tax = 0
+
+    surcharge_rate = get_surcharge(taxable_income)
 
     for slab in slabs:
         lower_limit, upper_limit = slab["range"]
@@ -95,8 +107,8 @@ def calculate_tax_table(taxable_income, slabs, tax_rebate_limit=0):
             cumulative_tax += slab_tax
 
             # Apply surcharge if applicable
-            if slabs[-1].get("surcharge") and taxable_income > slabs[-2]["range"][1]:
-                surcharge = cumulative_tax * slabs[-1]["surcharge"] / 100
+            if surcharge_rate:
+                surcharge = cumulative_tax * surcharge_rate / 100
 
             # Apply health and education cess
             cess = (cumulative_tax + surcharge) * 4 / 100

@@ -222,6 +222,19 @@ def tax_calculator_page():
                 + _append_suffix(monthly_tax)
             )
 
+            # Calculate and display take-home salary
+            yearly_take_home = income - final_tax_float
+            monthly_take_home = yearly_take_home / 12
+            
+            st.success(
+                f"Yearly Take-Home Salary: ₹{yearly_take_home:,.0f}"
+                + _append_suffix(yearly_take_home)
+            )
+            st.info(
+                f"Monthly Take-Home Salary: ₹{monthly_take_home:,.0f}"
+                + _append_suffix(monthly_take_home)
+            )
+
         # Do not proceed if the flag to compare is not set
         if not should_compare:
             return

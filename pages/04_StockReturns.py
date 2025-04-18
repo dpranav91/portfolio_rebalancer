@@ -1,3 +1,4 @@
+import logging
 import streamlit as st
 import yfinance as yf
 import pandas as pd
@@ -6,11 +7,52 @@ from datetime import datetime, timedelta
 import numpy as np  # Usually implicitly used by pandas, but good to have if needed
 import os
 import random
+import json
+from pathlib import Path
 
 ###
 # set env var to use mock data
-os.environ['MOCK_YF_DATA'] = 'True'
+# os.environ['MOCK_YF_DATA'] = 'True'
 ###
+
+# --- Cache Configuration ---
+CACHE_DIR = Path("cache/stock_data")
+CACHE_DIR.mkdir(parents=True, exist_ok=True)
+TODAY = datetime.now().strftime("%d%m%y")
+
+def get_cache_file(ticker):
+    """Get the cache file path for a given ticker."""
+    return CACHE_DIR / f"{ticker}_{TODAY}.json"
+
+def save_to_cache(ticker, data):
+    """Save stock data to cache file."""
+    cache_file = get_cache_file(ticker)
+    try:
+        # Convert data to serializable format
+        cache_data = {
+            'history': data[0].to_json() if data[0] is not None else None,
+            'info': data[1],
+            'error': data[2]
+        }
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f)
+    except Exception as e:
+        st.warning(f"Failed to cache data for {ticker}: {str(e)}")
+
+def load_from_cache(ticker):
+    """Load stock data from cache file if it exists."""
+    cache_file = get_cache_file(ticker)
+    if cache_file.exists():
+        try:
+            with open(cache_file, 'r') as f:
+                cache_data = json.load(f)
+            # Convert data back to original format
+            history = pd.read_json(cache_data['history']) if cache_data['history'] else None
+            return history, cache_data['info'], cache_data['error']
+        except Exception as e:
+            st.warning(f"Failed to load cached data for {ticker}: {str(e)}")
+            return None
+    return None
 
 # --- Mock Data Generator ---
 def generate_mock_data(ticker_symbol, days=730):  # 2 years of data
@@ -76,31 +118,41 @@ def generate_mock_data(ticker_symbol, days=730):  # 2 years of data
 def get_stock_data(ticker_symbol):
     """Fetches stock data using yfinance or mock data if MOCK_YF_DATA is set."""
     try:
+
         if os.getenv('MOCK_YF_DATA'):
             history, info = generate_mock_data(ticker_symbol)
-            return history, info, None  # Return None for error_msg when using mock data
-        
+            data = (history, info, None)
+            return data
+
+        # Try to load from cache first
+        cached_data = load_from_cache(ticker_symbol)
+        if cached_data is not None:
+            return cached_data
+                
         ticker = yf.Ticker(ticker_symbol)
         # Get enough history for 1-year chart + 52-week range + prior day for daily return
         history = ticker.history(period="2y")
         info = ticker.info
         if history.empty:
-            return (
-                None,
-                None,
-                f"No historical data found for {ticker_symbol}. It might be delisted or invalid.",
-            )
+            data = (None, None, f"No historical data found for {ticker_symbol}. It might be delisted or invalid.")
+            save_to_cache(ticker_symbol, data)
+            return data
         # Check if essential info is missing (often happens for indices, crypto, etc.)
         if not info or "regularMarketPrice" not in info and "currentPrice" not in info:
             # Use last close from history if market price isn't in info (fallback)
             if not history.empty:
                 info["currentPrice"] = history["Close"].iloc[-1]
             else:  # If both info and history are problematic
-                return None, None, f"Could not retrieve basic info for {ticker_symbol}."
-        return history, info, None  # Return history, info, and no error message
+                data = (None, None, f"Could not retrieve basic info for {ticker_symbol}.")
+                save_to_cache(ticker_symbol, data)
+                return data
+        data = (history, info, None)  # Return history, info, and no error message
+        save_to_cache(ticker_symbol, data)
+        return data
     except Exception as e:
         st.error(f"An error occurred fetching data for {ticker_symbol}: {e}")
-        return None, None, str(e)
+        data = (None, None, str(e))
+        return data
 
 
 def calculate_returns(history_df):
@@ -236,43 +288,34 @@ if analyze_button:
             ]
             fifty_two_week_low = history_1y["Low"].min() if not history_1y.empty else np.nan
             fifty_two_week_high = history_1y["High"].max() if not history_1y.empty else np.nan
-
-            if pd.notna(fifty_two_week_low) and pd.notna(fifty_two_week_high) and fifty_two_week_high > fifty_two_week_low:
-                position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
-            else:
+            
+            # Safe calculation of position with null checks
+            try:
+                if (pd.notna(current_price) and 
+                    pd.notna(fifty_two_week_low) and 
+                    pd.notna(fifty_two_week_high) and 
+                    fifty_two_week_high > fifty_two_week_low):
+                    position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
+                else:
+                    position = np.nan
+            except:
+                logging.error(f"Error calculating position for {ticker_symbol}")
                 position = np.nan
-
-            stock_data.append({
-                'symbol': ticker_symbol,
-                'history': history,
-                'info': info,
-                'returns': returns,
-                'current_price': current_price,
-                'position': position,
-                'history_1y': history_1y
-            })
-
-        # Sort stocks by position (distance from 52-week low)
-        stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
-
-        # Display sorted stocks
-        for stock in stock_data:
-            ticker_symbol = stock['symbol']
-            history = stock['history']
-            info = stock['info']
-            returns = stock['returns']
-            current_price = stock['current_price']
-            position = stock['position']
-            history_1y = stock['history_1y']
 
             # Format range position for display
             range_position_str = f"{position:.0f}%" if pd.notna(position) else "N/A"
             
+            # Safe formatting of values
+            ticker_str = str(ticker_symbol) if ticker_symbol is not None else "Unknown"
+            price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
+            daily_str = f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A"
+            yearly_str = f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A"
+            
             key_info = (
-                f"{ticker_symbol} | "
-                f"Price: {current_price:.2f} | "
-                f"1D: {daily_return:+.2f}% | "
-                f"1Y: {yearly_return:+.2f}% | "
+                f"{ticker_str} | "
+                f"Price: {price_str} | "
+                f"1D: {daily_str} | "
+                f"1Y: {yearly_str} | "
                 f"52W: {range_position_str}"
             )
             

@@ -159,32 +159,166 @@ st.set_page_config(layout="wide")  # Use wide layout for more space
 st.title(":chart_with_upwards_trend: Stock Analysis Dashboard")
 # --- Input Area ---
 st.sidebar.header("Input")
-ticker_input = st.sidebar.text_area(
-    "Enter Stock Tickers (comma-separated)",
-    "AAPL, MSFT, GOOGL, NVDA, ^GSPC",  # Default examples
-    height=100,
+
+# Input method selection
+input_method = st.sidebar.radio(
+    "Choose Input Method",
+    ["Manual Entry", "Kite Holdings Upload"]
 )
-analyze_button = st.sidebar.button("Analyze Stocks")
-if analyze_button and ticker_input:
-    if os.getenv('MOCK_YF_DATA'):
-        st.warning("Using mock data for stock data")
-    tickers = [
-        ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()
-    ]
-    if not tickers:
-        st.warning("Please enter at least one valid ticker symbol.")
+
+# Store Kite data in session state to access it later
+if "kite_data" not in st.session_state:
+    st.session_state.kite_data = None
+
+if input_method == "Manual Entry":
+    ticker_input = st.sidebar.text_area(
+        "Enter Stock Tickers (comma-separated)",
+        "AAPL, MSFT, GOOGL, NVDA, ^GSPC",  # Default examples
+        height=100,
+    )
+    tickers = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()] if ticker_input else []
+    st.session_state.kite_data = None
+else:
+    uploaded_file = st.sidebar.file_uploader("Upload Kite Holdings File", type=['csv'])
+    if uploaded_file is not None:
+        try:
+            # Read the CSV file
+            df = pd.read_csv(uploaded_file)
+            
+            # Check if required columns exist
+            required_columns = ['Instrument']
+            if not all(col in df.columns for col in required_columns):
+                st.error("The uploaded file doesn't have the required column: 'Instrument'")
+                tickers = []
+                st.session_state.kite_data = None
+            else:
+                # Extract tickers from the Instrument column
+                tickers = df['Instrument'].tolist()
+                # Store the full dataframe in session state
+                st.session_state.kite_data = df
+                
+                # Display the parsed data
+                st.sidebar.success(f"Found {len(tickers)} stocks in the uploaded file")
+                with st.sidebar.expander("View Uploaded Data"):
+                    st.dataframe(df)
+        except Exception as e:
+            st.error(f"Error reading the file: {str(e)}")
+            tickers = []
+            st.session_state.kite_data = None
     else:
-        st.success(f"Analyzing: {', '.join(tickers)}")
+        tickers = []
+        st.session_state.kite_data = None
+
+analyze_button = st.sidebar.button("Analyze Stocks")
+
+if analyze_button:
+    if not tickers:
+        st.warning("Please enter ticker symbols or upload a Kite Holdings file.")
+    else:
+        if os.getenv('MOCK_YF_DATA'):
+            st.warning("Using mock data for stock data")
+
+        # Process all stocks first to get sorting data
+        stock_data = []
         for ticker_symbol in tickers:
             history, info, error_msg = get_stock_data(ticker_symbol)
-            # show key info (stock name, current price, daily return, yearly return)
+            if error_msg or history is None or info is None:
+                continue
+
             returns = calculate_returns(history)
             daily_return = returns.get("Daily", np.nan)
             yearly_return = returns.get("1Y", np.nan)
             current_price = info.get("currentPrice")
+
+            # Calculate position in 52-week range
+            history_1y = history[
+                history.index > (history.index[-1] - pd.DateOffset(years=1))
+            ]
+            fifty_two_week_low = history_1y["Low"].min() if not history_1y.empty else np.nan
+            fifty_two_week_high = history_1y["High"].max() if not history_1y.empty else np.nan
+
+            if pd.notna(fifty_two_week_low) and pd.notna(fifty_two_week_high) and fifty_two_week_high > fifty_two_week_low:
+                position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
+            else:
+                position = np.nan
+
+            stock_data.append({
+                'symbol': ticker_symbol,
+                'history': history,
+                'info': info,
+                'returns': returns,
+                'current_price': current_price,
+                'position': position,
+                'history_1y': history_1y
+            })
+
+        # Sort stocks by position (distance from 52-week low)
+        stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
+
+        # Display sorted stocks
+        for stock in stock_data:
+            ticker_symbol = stock['symbol']
+            history = stock['history']
+            info = stock['info']
+            returns = stock['returns']
+            current_price = stock['current_price']
+            position = stock['position']
+            history_1y = stock['history_1y']
+
+            # Format range position for display
+            range_position_str = f"{position:.0f}%" if pd.notna(position) else "N/A"
             
-            key_info = f"{ticker_symbol} | Current Price: ${current_price:.2f} | Daily Return: {daily_return:+.2f}% | Yearly Return: {yearly_return:+.2f}%"
+            key_info = (
+                f"{ticker_symbol} | "
+                f"Price: {current_price:.2f} | "
+                f"1D: {daily_return:+.2f}% | "
+                f"1Y: {yearly_return:+.2f}% | "
+                f"52W: {range_position_str}"
+            )
+            
             with st.expander(key_info, expanded=False):
+                # Show Kite Holdings data if available
+                if st.session_state.kite_data is not None and ticker_symbol in st.session_state.kite_data['Instrument'].values:
+                    st.subheader("Kite Holdings Data")
+                    kite_row = st.session_state.kite_data[st.session_state.kite_data['Instrument'] == ticker_symbol].iloc[0]
+                    col1, col2, col3 = st.columns(3)
+                    
+                    # Format monetary values with commas
+                    def format_money(value):
+                        try:
+                            return f"₹{float(value):,.2f}"
+                        except:
+                            return value
+                    
+                    # Column 1: Basic Info
+                    with col1:
+                        st.markdown("**Holdings Info**")
+                        st.write(f"Quantity: {int(kite_row['Qty.'])}")
+                        st.write(f"Avg. Cost: {format_money(kite_row['Avg. cost'])}")
+                        st.write(f"LTP: {format_money(kite_row['LTP'])}")
+                    
+                    # Column 2: Investment Details
+                    with col2:
+                        st.markdown("**Investment Details**")
+                        st.write(f"Invested: {format_money(kite_row['Invested'])}")
+                        st.write(f"Current Value: {format_money(kite_row['Cur. val'])}")
+                    
+                    # Column 3: Performance
+                    with col3:
+                        st.markdown("**Performance**")
+                        pnl = float(kite_row['P&L'])
+                        pnl_color = "green" if pnl >= 0 else "red"
+                        net_chg = float(kite_row['Net chg.'])
+                        net_color = "green" if net_chg >= 0 else "red"
+                        day_chg = float(kite_row['Day chg.'])
+                        day_color = "green" if day_chg >= 0 else "red"
+                        
+                        st.markdown(f"P&L: <span style='color: {pnl_color}'>{format_money(pnl)}</span>", unsafe_allow_html=True)
+                        st.markdown(f"Net Change: <span style='color: {net_color}'>{net_chg:+.2f}%</span>", unsafe_allow_html=True)
+                        st.markdown(f"Day Change: <span style='color: {day_color}'>{day_chg:+.2f}%</span>", unsafe_allow_html=True)
+                    
+                    st.markdown("---")  # Separator between Kite data and YF data
+                
                 with st.spinner(f"Fetching and processing data for {ticker_symbol}..."):
                     if error_msg:
                         st.error(f"Failed to process {ticker_symbol}: {error_msg}")
@@ -299,7 +433,7 @@ if analyze_button and ticker_input:
                         margin=dict(l=20, r=20, t=30, b=20),  # Compact margins
                         xaxis_rangeslider_visible=False,  # Hide the default range slider
                     )
-                    st.plotly_chart(fig, use_container_width=True)
+                    st.plotly_chart(fig, use_container_width=True, key=f"chart_{ticker_symbol}")
                 else:
                     st.warning(f"Not enough data to plot 1-year chart for {ticker_symbol}.")
 elif analyze_button and not ticker_input:

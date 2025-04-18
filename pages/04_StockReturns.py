@@ -16,9 +16,24 @@ from pathlib import Path
 ###
 
 # --- Cache Configuration ---
-CACHE_DIR = Path("cache/stock_data")
+PROJECT_ROOT = Path(__file__).parent.parent
+CACHE_DIR = PROJECT_ROOT / "cache/stock_data"
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 TODAY = datetime.now().strftime("%d%m%y")
+
+STOCK_MAPPING_FILE = PROJECT_ROOT / "stock_ticker_mapping.json"
+
+
+def get_stock_mapping():
+    """Get the stock mapping from the stock_ticker_mapping.json file."""
+    with open(STOCK_MAPPING_FILE, 'r') as f:
+        return json.load(f)
+
+try:
+    STOCK_MAPPING = get_stock_mapping()
+except Exception as e:
+    st.error(f"Failed to load stock mapping: {str(e)}")
+    STOCK_MAPPING = {}
 
 def get_cache_file(ticker):
     """Get the cache file path for a given ticker."""
@@ -128,14 +143,14 @@ def get_stock_data(ticker_symbol):
         cached_data = load_from_cache(ticker_symbol)
         if cached_data is not None:
             return cached_data
-                
-        ticker = yf.Ticker(ticker_symbol)
+
+        ticker_symbol_yf = STOCK_MAPPING.get(ticker_symbol, ticker_symbol)
+        ticker = yf.Ticker(ticker_symbol_yf)
         # Get enough history for 1-year chart + 52-week range + prior day for daily return
         history = ticker.history(period="2y")
         info = ticker.info
         if history.empty:
             data = (None, None, f"No historical data found for {ticker_symbol}. It might be delisted or invalid.")
-            save_to_cache(ticker_symbol, data)
             return data
         # Check if essential info is missing (often happens for indices, crypto, etc.)
         if not info or "regularMarketPrice" not in info and "currentPrice" not in info:
@@ -144,7 +159,6 @@ def get_stock_data(ticker_symbol):
                 info["currentPrice"] = history["Close"].iloc[-1]
             else:  # If both info and history are problematic
                 data = (None, None, f"Could not retrieve basic info for {ticker_symbol}.")
-                save_to_cache(ticker_symbol, data)
                 return data
         data = (history, info, None)  # Return history, info, and no error message
         save_to_cache(ticker_symbol, data)
@@ -283,24 +297,114 @@ if analyze_button:
             current_price = info.get("currentPrice")
 
             # Calculate position in 52-week range
-            history_1y = history[
-                history.index > (history.index[-1] - pd.DateOffset(years=1))
-            ]
-            fifty_two_week_low = history_1y["Low"].min() if not history_1y.empty else np.nan
-            fifty_two_week_high = history_1y["High"].max() if not history_1y.empty else np.nan
-            
-            # Safe calculation of position with null checks
             try:
-                if (pd.notna(current_price) and 
-                    pd.notna(fifty_two_week_low) and 
-                    pd.notna(fifty_two_week_high) and 
-                    fifty_two_week_high > fifty_two_week_low):
-                    position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
-                else:
+                history_1y = history[
+                    history.index > (history.index[-1] - pd.DateOffset(years=1))
+                ]
+                
+                if history_1y.empty:
+                    logging.warning(f"No 1-year history data for {ticker_symbol}")
                     position = np.nan
-            except:
-                logging.error(f"Error calculating position for {ticker_symbol}")
+                else:
+                    fifty_two_week_low = history_1y["Low"].min()
+                    fifty_two_week_high = history_1y["High"].max()
+                    current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["Close"].iloc[-1]
+
+                    if (pd.notna(current_price) and 
+                        pd.notna(fifty_two_week_low) and 
+                        pd.notna(fifty_two_week_high) and 
+                        fifty_two_week_high > fifty_two_week_low):
+                        
+                        position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
+                        position = max(0, min(100, position))  # Clamp between 0 and 100
+                        
+                        logging.info(f"{ticker_symbol} position calculation:")
+                        logging.info(f"Current: {current_price}, Low: {fifty_two_week_low}, High: {fifty_two_week_high}")
+                        logging.info(f"Position: {position}%")
+                    else:
+                        if not pd.notna(current_price):
+                            logging.warning(f"{ticker_symbol}: Invalid current price")
+                        if not pd.notna(fifty_two_week_low) or not pd.notna(fifty_two_week_high):
+                            logging.warning(f"{ticker_symbol}: Invalid 52-week range")
+                        if fifty_two_week_high <= fifty_two_week_low:
+                            logging.warning(f"{ticker_symbol}: High <= Low in 52-week range")
+                        position = np.nan
+            except Exception as e:
+                logging.error(f"Error calculating position for {ticker_symbol}: {str(e)}")
                 position = np.nan
+
+            stock_data.append({
+                'symbol': ticker_symbol,
+                'history': history,
+                'info': info,
+                'returns': returns,
+                'current_price': current_price,
+                'position': position,
+                'daily_return': daily_return,
+                'yearly_return': yearly_return,
+                'history_1y': history_1y
+            })
+
+        # Sort stocks by position (distance from 52-week high)
+        stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
+
+        # Prepare data for download
+        download_data = []
+        for stock in stock_data:
+            # Convert DataFrame to dict for JSON serialization
+            history_dict = stock['history'].to_dict() if stock['history'] is not None else None
+            history_1y_dict = stock['history_1y'].to_dict() if stock['history_1y'] is not None else None
+            
+            # Format numeric values
+            position = stock['position']
+            current_price = stock['current_price']
+            daily_return = stock['daily_return']
+            yearly_return = stock['yearly_return']
+            
+            download_data.append({
+                'symbol': stock['symbol'],
+                'current_price': f"{current_price:.2f}" if pd.notna(current_price) else "N/A",
+                'daily_return': f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A",
+                'yearly_return': f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A",
+                '52w_position': f"{position:.1f}%" if pd.notna(position) else "N/A",
+                # 'info': stock['info'],
+                # 'history': history_dict,
+                # 'history_1y': history_1y_dict,
+                'timestamp': datetime.now().isoformat()
+            })
+
+        # Add download button in sidebar
+        st.sidebar.markdown("---")
+        st.sidebar.subheader("Download Dashboard Data")
+        
+        if download_data:
+            # Convert to JSON string
+            json_str = json.dumps(download_data, indent=2)
+            
+            # Create download button
+            st.sidebar.download_button(
+                label="Download Data as JSON",
+                data=json_str,
+                file_name=f"stock_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+                mime="application/json",
+            )
+            
+            # Show data preview
+            with st.sidebar.expander("Preview Download Data"):
+                st.json(download_data)
+        else:
+            st.sidebar.info("Analyze stocks to enable download")
+
+        # Display sorted stocks
+        for stock in stock_data:
+            ticker_symbol = stock['symbol']
+            current_price = stock['current_price']
+            daily_return = stock['daily_return']
+            yearly_return = stock['yearly_return']
+            position = stock['position']
+            history = stock['history']
+            info = stock['info']
+            history_1y = stock['history_1y']
 
             # Format range position for display
             range_position_str = f"{position:.0f}%" if pd.notna(position) else "N/A"
@@ -422,9 +526,12 @@ if analyze_button:
                         st.write("52-Week Range: N/A")
                     # Other Details
                     st.write(f"**Market Cap:** {format_market_cap(info.get('marketCap'))}")
-                    st.write(
-                        f"**Volume:** {info.get('regularMarketVolume', info.get('volume', 'N/A')):,.0f}"
-                    )  # Try different volume keys
+                    
+                    # Format volume with safe handling of non-numeric values
+                    volume = info.get('regularMarketVolume', info.get('volume'))
+                    volume_str = f"{volume:,.0f}" if isinstance(volume, (int, float)) else "N/A"
+                    st.write(f"**Volume:** {volume_str}")
+                    
                     st.write(
                         f"**P/E Ratio (TTM):** {info.get('trailingPE', 'N/A'):.2f}"
                         if isinstance(info.get("trailingPE"), float)

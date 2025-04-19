@@ -9,6 +9,7 @@ import os
 import random
 import json
 from pathlib import Path
+from io import StringIO
 
 ###
 # set env var to use mock data
@@ -61,8 +62,8 @@ def load_from_cache(ticker):
         try:
             with open(cache_file, 'r') as f:
                 cache_data = json.load(f)
-            # Convert data back to original format
-            history = pd.read_json(cache_data['history']) if cache_data['history'] else None
+            # Convert data back to original format using StringIO
+            history = pd.read_json(StringIO(cache_data['history'])) if cache_data['history'] else None
             return history, cache_data['info'], cache_data['error']
         except Exception as e:
             st.warning(f"Failed to load cached data for {ticker}: {str(e)}")
@@ -174,16 +175,19 @@ def calculate_returns(history_df):
     returns = {}
     if len(history_df) < 2:
         return returns  # Not enough data
+    
     today = history_df.index[-1]
     close_prices = history_df["Close"]
     current_price = close_prices.iloc[-1]
-    # --- Daily Return ---
+    
+    # Daily Return
     if len(close_prices) >= 2:
         prev_close = close_prices.iloc[-2]
         returns["Daily"] = ((current_price / prev_close) - 1) * 100
     else:
         returns["Daily"] = np.nan
-    # --- Time-based Returns ---
+    
+    # Time-based Returns
     periods = {
         "MTD": today.replace(day=1),
         "3M": today - pd.DateOffset(months=3),
@@ -191,20 +195,49 @@ def calculate_returns(history_df):
         "YTD": datetime(today.year, 1, 1),
         "1Y": today - pd.DateOffset(years=1),
     }
-    # Adjust start dates if they fall on a weekend/holiday (go to previous business day)
-    # Use asof for robust lookup even if exact date isn't in index
+    
     for name, start_date in periods.items():
         try:
-            # Find the closest available trading day price *on or before* the start date
             start_price = close_prices.asof(start_date)
             if pd.notna(start_price) and start_price > 0:
                 returns[name] = ((current_price / start_price) - 1) * 100
             else:
-                returns[name] = np.nan  # Cannot calculate if no valid start price found
-        except Exception:  # Catch potential errors during lookup
+                returns[name] = np.nan
+        except Exception:
             returns[name] = np.nan
+    
     return returns
 
+def prepare_stock_data(ticker_symbol):
+    """Prepare all stock data including calculations and formatting."""
+    history, info, error_msg = get_stock_data(ticker_symbol)
+    if error_msg or history is None or info is None:
+        return None
+    
+    # Calculate returns
+    returns = calculate_returns(history)
+    daily_return = returns.get("Daily", np.nan)
+    yearly_return = returns.get("1Y", np.nan)
+    
+    # Get current price
+    current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["Close"].iloc[-1]
+    
+    # Calculate 52-week position
+    position, history_1y = calculate_52w_position(history, info)
+    
+    return {
+        'symbol': ticker_symbol,
+        'history': history,
+        'info': info,
+        'returns': returns,
+        'current_price': current_price,
+        'position': position,
+        'daily_return': daily_return,
+        'yearly_return': yearly_return,
+        'history_1y': history_1y,
+        '52w_low': history_1y['Low'].min() if history_1y is not None else None,
+        '52w_high': history_1y['High'].max() if history_1y is not None else None,
+    }
 
 def format_market_cap(mc):
     """Formats market cap into readable string (Millions, Billions, Trillions)."""
@@ -220,373 +253,356 @@ def format_market_cap(mc):
         return f"${mc:,.0f}"
 
 
-# --- Streamlit App ---
-st.set_page_config(layout="wide")  # Use wide layout for more space
-st.title(":chart_with_upwards_trend: Stock Analysis Dashboard")
-# --- Input Area ---
-st.sidebar.header("Input")
+def calculate_52w_position(history, info):
+    """Calculate the position in 52-week range."""
+    try:
+        history_1y = history[history.index > (history.index[-1] - pd.DateOffset(years=1))]
+        
+        if history_1y.empty:
+            logging.warning("No 1-year history data")
+            return np.nan, None
+        
+        fifty_two_week_low = history_1y["Low"].min()
+        fifty_two_week_high = history_1y["High"].max()
+        current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["Close"].iloc[-1]
 
-# Input method selection
-input_method = st.sidebar.radio(
-    "Choose Input Method",
-    ["Manual Entry", "Kite Holdings Upload"]
-)
-
-# Store Kite data in session state to access it later
-if "kite_data" not in st.session_state:
-    st.session_state.kite_data = None
-
-if input_method == "Manual Entry":
-    ticker_input = st.sidebar.text_area(
-        "Enter Stock Tickers (comma-separated)",
-        "AAPL, MSFT, GOOGL, NVDA, ^GSPC",  # Default examples
-        height=100,
-    )
-    tickers = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()] if ticker_input else []
-    st.session_state.kite_data = None
-else:
-    uploaded_file = st.sidebar.file_uploader("Upload Kite Holdings File", type=['csv'])
-    if uploaded_file is not None:
-        try:
-            # Read the CSV file
-            df = pd.read_csv(uploaded_file)
+        if (pd.notna(current_price) and 
+            pd.notna(fifty_two_week_low) and 
+            pd.notna(fifty_two_week_high) and 
+            fifty_two_week_high > fifty_two_week_low):
             
-            # Check if required columns exist
-            required_columns = ['Instrument']
-            if not all(col in df.columns for col in required_columns):
+            position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
+            position = max(0, min(100, position))  # Clamp between 0 and 100
+            
+            logging.info(f"Position calculation:")
+            logging.info(f"Current: {current_price}, Low: {fifty_two_week_low}, High: {fifty_two_week_high}")
+            logging.info(f"Position: {position}%")
+            return position, history_1y
+        else:
+            if not pd.notna(current_price):
+                logging.warning("Invalid current price")
+            if not pd.notna(fifty_two_week_low) or not pd.notna(fifty_two_week_high):
+                logging.warning("Invalid 52-week range")
+            if fifty_two_week_high <= fifty_two_week_low:
+                logging.warning("High <= Low in 52-week range")
+            return np.nan, history_1y
+    except Exception as e:
+        logging.error(f"Error calculating position: {str(e)}")
+        return np.nan, None
+
+def format_stock_data(stock):
+    """Format stock data for display and download."""
+    position = stock['position']
+    current_price = stock['current_price']
+    daily_return = stock['daily_return']
+    yearly_return = stock['yearly_return']
+    returns = stock['returns']
+    
+    return {
+        'symbol': stock['symbol'],
+        'current_price': f"{current_price:.2f}" if pd.notna(current_price) else "N/A",
+        'daily_return': f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A",
+        'yearly_return': f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A",
+        '52w_position': f"{position:.1f}%" if pd.notna(position) else "N/A",
+        '52w_low': f"{stock['52w_low']:.2f}" if stock['52w_low'] is not None else "N/A",
+        '52w_high': f"{stock['52w_high']:.2f}" if stock['52w_high'] is not None else "N/A",
+        'returns': {k: f"{v:+.2f}%" if pd.notna(v) else "N/A" for k, v in returns.items()},
+        # 'info': stock['info']
+    }
+
+def serialize_stock_data(stock):
+    """Convert stock data into a JSON-serializable format."""
+    # Extract numeric values from formatted strings
+    def extract_numeric(value):
+        if value == "N/A":
+            return None
+        try:
+            # Remove % and convert to float
+            return float(value.replace('%', '').replace('+', ''))
+        except (ValueError, AttributeError):
+            return None
+
+    return {
+        'symbol': stock['symbol'],
+        'current_price': extract_numeric(stock['current_price']),
+        'daily_return': extract_numeric(stock['daily_return']),
+        'yearly_return': extract_numeric(stock['yearly_return']),
+        '52w_position': extract_numeric(stock['52w_position']),
+        '52w_low': extract_numeric(stock['52w_low']),
+        '52w_high': extract_numeric(stock['52w_high']),
+        'returns': {k: extract_numeric(v) for k, v in stock['returns'].items()},
+        # 'info': {
+        #     k: (float(v) if isinstance(v, (int, float)) else str(v))
+        #     for k, v in stock['info'].items()
+        #     if isinstance(v, (int, float, str))
+        # }
+    }
+
+def create_download_button(download_data):
+    """Create download button in sidebar."""
+    st.sidebar.markdown("---")
+    st.sidebar.subheader("Download Dashboard Data")
+    
+    if download_data:
+        # Convert stock data to serializable format
+        serialized_data = [serialize_stock_data(stock) for stock in download_data]
+        json_str = json.dumps(serialized_data, indent=2)
+        
+        st.sidebar.download_button(
+            label="Download Data as JSON",
+            data=json_str,
+            file_name=f"stock_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
+            mime="application/json",
+        )
+        
+        with st.sidebar.expander("Preview Download Data"):
+            st.json(serialized_data)
+    else:
+        st.sidebar.info("Analyze stocks to enable download")
+
+def display_stock_info(stock):
+    """Display stock information in expander."""
+    ticker_symbol = stock['symbol']
+    current_price = stock['current_price']
+    daily_return = stock['daily_return']
+    yearly_return = stock['yearly_return']
+    position = stock['position']
+    
+    # Format values for display
+    range_position_str = f"{position:.0f}%" if pd.notna(position) else "N/A"
+    ticker_str = str(ticker_symbol) if ticker_symbol is not None else "Unknown"
+    price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
+    daily_str = f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A"
+    yearly_str = f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A"
+    
+    key_info = (
+        f"{ticker_str} | "
+        f"Price: {price_str} | "
+        f"1D: {daily_str} | "
+        f"1Y: {yearly_str} | "
+        f"52W: {range_position_str}"
+    )
+    
+    with st.expander(key_info, expanded=False):
+        # Show Kite Holdings data if available
+        if st.session_state.kite_data is not None and ticker_symbol in st.session_state.kite_data['Instrument'].values:
+            display_kite_data(ticker_symbol)
+        
+        display_stock_details(stock)
+
+def format_money(value):
+    """Format monetary values with currency symbol and thousands separator."""
+    if pd.isna(value) or value is None:
+        return "N/A"
+    try:
+        return f"₹{value:,.2f}"
+    except (ValueError, TypeError):
+        return "N/A"
+
+def display_kite_data(ticker_symbol):
+    """Display Kite Holdings data."""
+    st.subheader("Kite Holdings Data")
+    kite_row = st.session_state.kite_data[st.session_state.kite_data['Instrument'] == ticker_symbol].iloc[0]
+    col1, col2, col3 = st.columns(3)
+    
+    with col1:
+        st.markdown("**Holdings Info**")
+        st.write(f"Quantity: {int(kite_row['Qty.'])}")
+        st.write(f"Avg. Cost: {format_money(kite_row['Avg. cost'])}")
+        st.write(f"LTP: {format_money(kite_row['LTP'])}")
+    
+    with col2:
+        st.markdown("**Investment Details**")
+        st.write(f"Invested: {format_money(kite_row['Invested'])}")
+        st.write(f"Current Value: {format_money(kite_row['Cur. val'])}")
+    
+    with col3:
+        st.markdown("**Performance**")
+        pnl = float(kite_row['P&L'])
+        pnl_color = "green" if pnl >= 0 else "red"
+        net_chg = float(kite_row['Net chg.'])
+        net_color = "green" if net_chg >= 0 else "red"
+        day_chg = float(kite_row['Day chg.'])
+        day_color = "green" if day_chg >= 0 else "red"
+        
+        st.markdown(f"P&L: <span style='color: {pnl_color}'>{format_money(pnl)}</span>", unsafe_allow_html=True)
+        st.markdown(f"Net Change: <span style='color: {net_color}'>{net_chg:+.2f}%</span>", unsafe_allow_html=True)
+        st.markdown(f"Day Change: <span style='color: {day_color}'>{day_chg:+.2f}%</span>", unsafe_allow_html=True)
+    
+    st.markdown("---")
+
+def display_stock_details(stock):
+    """Display detailed stock information."""
+    info = stock['info']
+    returns = stock['returns']
+    history_1y = stock['history_1y']
+    
+    col1, col2, col3 = st.columns([1.5, 1, 1])
+    
+    with col1:
+        st.subheader("Key Info")
+        daily_delta = returns.get("Daily", np.nan)
+        delta_str = f"{daily_delta:.2f}%" if pd.notna(daily_delta) else None
+        
+        # Safe formatting of current price
+        current_price = stock['current_price']
+        price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
+        
+        st.metric(
+            label=f"Current Price ({info.get('currency', 'USD')})",
+            value=price_str,
+            delta=delta_str,
+        )
+        
+        # Display 52-week range
+        if history_1y is not None:
+            fifty_two_week_low = history_1y["Low"].min()
+            fifty_two_week_high = history_1y["High"].max()
+            if pd.notna(fifty_two_week_low) and pd.notna(fifty_two_week_high):
+                st.write(f"**52-Week Range:** ${fifty_two_week_low:.2f} - ${fifty_two_week_high:.2f}")
+                
+                # Add progress bar for 52-week range position
+                if fifty_two_week_high > fifty_two_week_low:
+                    if pd.notna(current_price):
+                        position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low)
+                        position = max(0, min(1, position))  # Clamp between 0 and 1
+                        st.progress(position)
+                        st.caption(f"Current price is at {position*100:.1f}% of the 52-week range.")
+                    else:
+                        st.caption("Current price not available for range position.")
+                else:
+                    st.caption("Cannot visualize range position (low >= high).")
+            else:
+                st.write("52-Week Range: N/A")
+        
+        # Other details
+        st.write(f"**Market Cap:** {format_market_cap(info.get('marketCap'))}")
+        volume = info.get('regularMarketVolume', info.get('volume'))
+        volume_str = f"{volume:,.0f}" if isinstance(volume, (int, float)) else "N/A"
+        st.write(f"**Volume:** {volume_str}")
+        
+        pe_ratio = info.get('trailingPE')
+        st.write(f"**P/E Ratio (TTM):** {pe_ratio:.2f}" if isinstance(pe_ratio, float) else "N/A")
+        
+        div_yield = info.get('dividendYield')
+        st.write(f"**Dividend Yield:** {div_yield*100:.2f}%" if isinstance(div_yield, float) else "N/A")
+        
+        beta = info.get('beta')
+        st.write(f"**Beta:** {beta:.2f}" if isinstance(beta, float) else "N/A")
+        
+        st.write(f"**Exchange:** {info.get('exchange', 'N/A')}")
+    
+    with col2:
+        st.subheader("Performance (%)")
+        perf_labels = ["Daily", "MTD", "3M", "6M", "YTD", "1Y"]
+        for label in perf_labels:
+            value = returns.get(label, np.nan)
+            if pd.notna(value):
+                color = "green" if value >= 0 else "red"
+                st.markdown(f"**{label}:** <span style='color: {color}'>{value:+.2f}%</span>", unsafe_allow_html=True)
+            else:
+                st.markdown(f"**{label}:** N/A")
+    
+    with col3:
+        st.subheader("About")
+        st.write(f"**Sector:** {info.get('sector', 'N/A')}")
+        st.write(f"**Industry:** {info.get('industry', 'N/A')}")
+        st.write(f"**Website:** {info.get('website', 'N/A')}")
+        st.write(f"**Country:** {info.get('country', 'N/A')}")
+    
+    # Plotting
+    if history_1y is not None and not history_1y.empty:
+        st.subheader("1-Year Price Chart")
+        fig = go.Figure()
+        fig.add_trace(
+            go.Scatter(
+                x=history_1y.index,
+                y=history_1y["Close"],
+                mode="lines",
+                name="Close Price",
+            )
+        )
+        fig.update_layout(
+            xaxis_title="Date",
+            yaxis_title=f"Price ({info.get('currency', 'USD')})",
+            margin=dict(l=20, r=20, t=30, b=20),
+            xaxis_rangeslider_visible=False,
+        )
+        st.plotly_chart(fig, use_container_width=True, key=f"chart_{stock['symbol']}")
+
+# --- Main Application ---
+def main():
+    st.set_page_config(layout="wide")
+    st.title(":chart_with_upwards_trend: Stock Analysis Dashboard")
+    
+    # Initialize session state
+    if "kite_data" not in st.session_state:
+        st.session_state.kite_data = None
+    
+    # Sidebar input
+    input_method = st.sidebar.radio(
+        "Choose Input Method",
+        ["Manual Entry", "Kite Holdings Upload"]
+    )
+    tickers = []
+    if input_method == "Manual Entry":
+        ticker_input = st.sidebar.text_area(
+            "Enter Stock Tickers (comma-separated)",
+            "AAPL, MSFT, GOOGL, NVDA, ^GSPC",
+            height=100,
+        )
+        tickers = [ticker.strip().upper() for ticker in ticker_input.split(",") if ticker.strip()]
+        st.session_state.kite_data = None
+    else:
+        uploaded_file = st.sidebar.file_uploader("Upload Kite Holdings File", type=['csv'])
+        if uploaded_file is not None:
+            df = pd.read_csv(uploaded_file)
+            if 'Instrument' not in df.columns:
                 st.error("The uploaded file doesn't have the required column: 'Instrument'")
                 tickers = []
-                st.session_state.kite_data = None
             else:
-                # Extract tickers from the Instrument column
                 tickers = df['Instrument'].tolist()
-                # Store the full dataframe in session state
                 st.session_state.kite_data = df
-                
-                # Display the parsed data
                 st.sidebar.success(f"Found {len(tickers)} stocks in the uploaded file")
                 with st.sidebar.expander("View Uploaded Data"):
                     st.dataframe(df)
-        except Exception as e:
-            st.error(f"Error reading the file: {str(e)}")
-            tickers = []
-            st.session_state.kite_data = None
-    else:
-        tickers = []
-        st.session_state.kite_data = None
+    
+    analyze_button = st.sidebar.button("Analyze Stocks")
+    
+    if analyze_button:
+        if not tickers:
+            st.warning("Please enter ticker symbols or upload a Kite Holdings file.")
 
-analyze_button = st.sidebar.button("Analyze Stocks")
-
-if analyze_button:
-    if not tickers:
-        st.warning("Please enter ticker symbols or upload a Kite Holdings file.")
-    else:
         if os.getenv('MOCK_YF_DATA'):
             st.warning("Using mock data for stock data")
-
-        # Process all stocks first to get sorting data
-        stock_data = []
-        for ticker_symbol in tickers:
-            history, info, error_msg = get_stock_data(ticker_symbol)
-            if error_msg or history is None or info is None:
-                continue
-
-            returns = calculate_returns(history)
-            daily_return = returns.get("Daily", np.nan)
-            yearly_return = returns.get("1Y", np.nan)
-            current_price = info.get("currentPrice")
-
-            # Calculate position in 52-week range
-            try:
-                history_1y = history[
-                    history.index > (history.index[-1] - pd.DateOffset(years=1))
-                ]
-                
-                if history_1y.empty:
-                    logging.warning(f"No 1-year history data for {ticker_symbol}")
-                    position = np.nan
-                else:
-                    fifty_two_week_low = history_1y["Low"].min()
-                    fifty_two_week_high = history_1y["High"].max()
-                    current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["Close"].iloc[-1]
-
-                    if (pd.notna(current_price) and 
-                        pd.notna(fifty_two_week_low) and 
-                        pd.notna(fifty_two_week_high) and 
-                        fifty_two_week_high > fifty_two_week_low):
-                        
-                        position = (current_price - fifty_two_week_low) / (fifty_two_week_high - fifty_two_week_low) * 100
-                        position = max(0, min(100, position))  # Clamp between 0 and 100
-                        
-                        logging.info(f"{ticker_symbol} position calculation:")
-                        logging.info(f"Current: {current_price}, Low: {fifty_two_week_low}, High: {fifty_two_week_high}")
-                        logging.info(f"Position: {position}%")
-                    else:
-                        if not pd.notna(current_price):
-                            logging.warning(f"{ticker_symbol}: Invalid current price")
-                        if not pd.notna(fifty_two_week_low) or not pd.notna(fifty_two_week_high):
-                            logging.warning(f"{ticker_symbol}: Invalid 52-week range")
-                        if fifty_two_week_high <= fifty_two_week_low:
-                            logging.warning(f"{ticker_symbol}: High <= Low in 52-week range")
-                        position = np.nan
-            except Exception as e:
-                logging.error(f"Error calculating position for {ticker_symbol}: {str(e)}")
-                position = np.nan
-
-            stock_data.append({
-                'symbol': ticker_symbol,
-                'history': history,
-                'info': info,
-                'returns': returns,
-                'current_price': current_price,
-                'position': position,
-                'daily_return': daily_return,
-                'yearly_return': yearly_return,
-                'history_1y': history_1y
-            })
-
-        # Sort stocks by position (distance from 52-week high)
-        stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
-
-        # Prepare data for download
-        download_data = []
-        for stock in stock_data:
-            # Convert DataFrame to dict for JSON serialization
-            history_dict = stock['history'].to_dict() if stock['history'] is not None else None
-            history_1y_dict = stock['history_1y'].to_dict() if stock['history_1y'] is not None else None
-            
-            # Format numeric values
-            position = stock['position']
-            current_price = stock['current_price']
-            daily_return = stock['daily_return']
-            yearly_return = stock['yearly_return']
-            
-            download_data.append({
-                'symbol': stock['symbol'],
-                'current_price': f"{current_price:.2f}" if pd.notna(current_price) else "N/A",
-                'daily_return': f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A",
-                'yearly_return': f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A",
-                '52w_position': f"{position:.1f}%" if pd.notna(position) else "N/A",
-                # 'info': stock['info'],
-                # 'history': history_dict,
-                # 'history_1y': history_1y_dict,
-                'timestamp': datetime.now().isoformat()
-            })
-
-        # Add download button in sidebar
-        st.sidebar.markdown("---")
-        st.sidebar.subheader("Download Dashboard Data")
         
-        if download_data:
-            # Convert to JSON string
-            json_str = json.dumps(download_data, indent=2)
-            
-            # Create download button
-            st.sidebar.download_button(
-                label="Download Data as JSON",
-                data=json_str,
-                file_name=f"stock_dashboard_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json",
-                mime="application/json",
-            )
-            
-            # Show data preview
-            with st.sidebar.expander("Preview Download Data"):
-                st.json(download_data)
-        else:
-            st.sidebar.info("Analyze stocks to enable download")
-
-        # Display sorted stocks
+        # add progress bar
+        progress_bar = st.progress(0)
+        progress_text = st.empty()
+        
+        # Process all stocks
+        stock_data = []
+        for i, ticker_symbol in enumerate(tickers):
+            stock = prepare_stock_data(ticker_symbol)
+            if stock is not None:
+                stock_data.append(stock)
+            progress_bar.progress((i + 1) / len(tickers))
+            progress_text.text(f"Processing {ticker_symbol} ({i + 1}/{len(tickers)})")
+        
+        # clear progress bar
+        progress_bar.empty()
+        progress_text.empty()
+        
+        # Sort stocks by position
+        stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
+        
+        # Prepare download data
+        download_data = [format_stock_data(stock) for stock in stock_data]
+        create_download_button(download_data)
+        
+        # Display stocks
         for stock in stock_data:
-            ticker_symbol = stock['symbol']
-            current_price = stock['current_price']
-            daily_return = stock['daily_return']
-            yearly_return = stock['yearly_return']
-            position = stock['position']
-            history = stock['history']
-            info = stock['info']
-            history_1y = stock['history_1y']
+            display_stock_info(stock)
 
-            # Format range position for display
-            range_position_str = f"{position:.0f}%" if pd.notna(position) else "N/A"
-            
-            # Safe formatting of values
-            ticker_str = str(ticker_symbol) if ticker_symbol is not None else "Unknown"
-            price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
-            daily_str = f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A"
-            yearly_str = f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A"
-            
-            key_info = (
-                f"{ticker_str} | "
-                f"Price: {price_str} | "
-                f"1D: {daily_str} | "
-                f"1Y: {yearly_str} | "
-                f"52W: {range_position_str}"
-            )
-            
-            with st.expander(key_info, expanded=False):
-                # Show Kite Holdings data if available
-                if st.session_state.kite_data is not None and ticker_symbol in st.session_state.kite_data['Instrument'].values:
-                    st.subheader("Kite Holdings Data")
-                    kite_row = st.session_state.kite_data[st.session_state.kite_data['Instrument'] == ticker_symbol].iloc[0]
-                    col1, col2, col3 = st.columns(3)
-                    
-                    # Format monetary values with commas
-                    def format_money(value):
-                        try:
-                            return f"₹{float(value):,.2f}"
-                        except:
-                            return value
-                    
-                    # Column 1: Basic Info
-                    with col1:
-                        st.markdown("**Holdings Info**")
-                        st.write(f"Quantity: {int(kite_row['Qty.'])}")
-                        st.write(f"Avg. Cost: {format_money(kite_row['Avg. cost'])}")
-                        st.write(f"LTP: {format_money(kite_row['LTP'])}")
-                    
-                    # Column 2: Investment Details
-                    with col2:
-                        st.markdown("**Investment Details**")
-                        st.write(f"Invested: {format_money(kite_row['Invested'])}")
-                        st.write(f"Current Value: {format_money(kite_row['Cur. val'])}")
-                    
-                    # Column 3: Performance
-                    with col3:
-                        st.markdown("**Performance**")
-                        pnl = float(kite_row['P&L'])
-                        pnl_color = "green" if pnl >= 0 else "red"
-                        net_chg = float(kite_row['Net chg.'])
-                        net_color = "green" if net_chg >= 0 else "red"
-                        day_chg = float(kite_row['Day chg.'])
-                        day_color = "green" if day_chg >= 0 else "red"
-                        
-                        st.markdown(f"P&L: <span style='color: {pnl_color}'>{format_money(pnl)}</span>", unsafe_allow_html=True)
-                        st.markdown(f"Net Change: <span style='color: {net_color}'>{net_chg:+.2f}%</span>", unsafe_allow_html=True)
-                        st.markdown(f"Day Change: <span style='color: {day_color}'>{day_chg:+.2f}%</span>", unsafe_allow_html=True)
-                    
-                    st.markdown("---")  # Separator between Kite data and YF data
-                
-                with st.spinner(f"Fetching and processing data for {ticker_symbol}..."):
-                    if error_msg:
-                        st.error(f"Failed to process {ticker_symbol}: {error_msg}")
-                        continue  # Skip to the next ticker
-                    if history is None or info is None:
-                        st.error(f"Could not retrieve sufficient data for {ticker_symbol}.")
-                        continue
-                # --- Calculations ---
-                current_price = (
-                    info.get("currentPrice")
-                    or info.get("regularMarketPrice")
-                    or history["Close"].iloc[-1]
-                )  # Robust current price check
-                returns = calculate_returns(history)
-                # 52-Week Range - use history High/Low over approx last 252 trading days
-                history_1y = history[
-                    history.index > (history.index[-1] - pd.DateOffset(years=1))
-                ]
-                fifty_two_week_low = (
-                    history_1y["Low"].min() if not history_1y.empty else np.nan
-                )
-                fifty_two_week_high = (
-                    history_1y["High"].max() if not history_1y.empty else np.nan
-                )
-                # --- Display Data ---
-                col1, col2, col3 = st.columns([1.5, 1, 1])  # Adjust column ratios as needed
-                with col1:
-                    st.subheader("Key Info")
-                    daily_delta = returns.get("Daily", np.nan)
-                    delta_str = f"{daily_delta:.2f}%" if pd.notna(daily_delta) else None
-                    st.metric(
-                        label=f"Current Price ({info.get('currency', 'USD')})",
-                        value=f"{current_price:.2f}",
-                        delta=delta_str,
-                    )
-                    # Display 52-week range textually
-                    if pd.notna(fifty_two_week_low) and pd.notna(fifty_two_week_high):
-                        st.write(
-                            f"**52-Week Range:** ${fifty_two_week_low:.2f} - ${fifty_two_week_high:.2f}"
-                        )
-                        # Visual Indicator for 52-Week Range (Progress Bar)
-                        if (
-                            fifty_two_week_high > fifty_two_week_low
-                        ):  # Avoid division by zero
-                            position = (current_price - fifty_two_week_low) / (
-                                fifty_two_week_high - fifty_two_week_low
-                            )
-                            position = max(0, min(1, position))  # Clamp between 0 and 1
-                            st.progress(position)
-                            st.caption(
-                                f"Current price is at {position*100:.1f}% of the 52-week range."
-                            )
-                        else:
-                            st.caption(
-                                "Cannot visualize range position (low >= high or data missing)."
-                            )
-                    else:
-                        st.write("52-Week Range: N/A")
-                    # Other Details
-                    st.write(f"**Market Cap:** {format_market_cap(info.get('marketCap'))}")
-                    
-                    # Format volume with safe handling of non-numeric values
-                    volume = info.get('regularMarketVolume', info.get('volume'))
-                    volume_str = f"{volume:,.0f}" if isinstance(volume, (int, float)) else "N/A"
-                    st.write(f"**Volume:** {volume_str}")
-                    
-                    st.write(
-                        f"**P/E Ratio (TTM):** {info.get('trailingPE', 'N/A'):.2f}"
-                        if isinstance(info.get("trailingPE"), float)
-                        else "N/A"
-                    )
-                    div_yield = info.get("dividendYield")
-                    st.write(
-                        f"**Dividend Yield:** {div_yield*100:.2f}%"
-                        if isinstance(div_yield, float)
-                        else "N/A"
-                    )
-                    st.write(
-                        f"**Beta:** {info.get('beta', 'N/A'):.2f}"
-                        if isinstance(info.get("beta"), float)
-                        else "N/A"
-                    )
-                    st.write(f"**Exchange:** {info.get('exchange', 'N/A')}")
-                with col2:
-                    st.subheader("Performance (%)")
-                    perf_labels = ["Daily", "MTD", "3M", "6M", "YTD", "1Y"]
-                    for label in perf_labels:
-                        value = returns.get(label, np.nan)
-                        if pd.notna(value):
-                            color = "green" if value >= 0 else "red"
-                            st.markdown(f"**{label}:** <span style='color: {color}'>{value:+.2f}%</span>", unsafe_allow_html=True)
-                        else:
-                            st.markdown(f"**{label}:** N/A")
-                with col3:
-                    st.subheader("About")
-                    st.write(f"**Sector:** {info.get('sector', 'N/A')}")
-                    st.write(f"**Industry:** {info.get('industry', 'N/A')}")
-                    st.write(f"**Website:** {info.get('website', 'N/A')}")
-                    st.write(f"**Country:** {info.get('country', 'N/A')}")
-                # --- Plotting ---
-                st.subheader("1-Year Price Chart")
-                if not history_1y.empty:
-                    fig = go.Figure()
-                    fig.add_trace(
-                        go.Scatter(
-                            x=history_1y.index,
-                            y=history_1y["Close"],
-                            mode="lines",
-                            name="Close Price",
-                        )
-                    )
-                    fig.update_layout(
-                        xaxis_title="Date",
-                        yaxis_title=f"Price ({info.get('currency', 'USD')})",
-                        margin=dict(l=20, r=20, t=30, b=20),  # Compact margins
-                        xaxis_rangeslider_visible=False,  # Hide the default range slider
-                    )
-                    st.plotly_chart(fig, use_container_width=True, key=f"chart_{ticker_symbol}")
-                else:
-                    st.warning(f"Not enough data to plot 1-year chart for {ticker_symbol}.")
-elif analyze_button and not ticker_input:
-    st.sidebar.warning("Please enter ticker symbols in the text area.")
-else:
-    st.info("Enter stock tickers in the sidebar and click 'Analyze Stocks'.")
+if __name__ == "__main__":
+    main()

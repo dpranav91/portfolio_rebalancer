@@ -383,7 +383,19 @@ def display_stock_info(stock):
         f"52W: {range_position_str}"
     )
     
-    with st.expander(key_info, expanded=False):
+    # Create anchor for this section
+    anchor = f"stock_{ticker_symbol}"
+    st.markdown(f'<div id="{anchor}"></div>', unsafe_allow_html=True)
+    
+    with st.expander(key_info, expanded=True):
+        # Add back to summary link
+        st.markdown(
+            f'<div style="text-align: right; margin-bottom: 1rem;">'
+            f'<a href="#summary_table" style="text-decoration: none;">⬆️ Back to Summary</a>'
+            f'</div>',
+            unsafe_allow_html=True
+        )
+        
         # Show Kite Holdings data if available
         if st.session_state.kite_data is not None and ticker_symbol in st.session_state.kite_data['Instrument'].values:
             display_kite_data(ticker_symbol)
@@ -492,36 +504,36 @@ def display_stock_details(stock):
         
         st.write(f"**Exchange:** {info.get('exchange', 'N/A')}")
     
-    with col2:
-        st.subheader("Performance (%)")
-        perf_labels = ["Daily", "MTD", "3M", "6M", "YTD", "1Y"]
-        for label in perf_labels:
-            value = returns.get(label, np.nan)
-            if pd.notna(value):
-                color = "green" if value >= 0 else "red"
-                st.markdown(f"**{label}:** <span style='color: {color}'>{value:+.2f}%</span>", unsafe_allow_html=True)
-            else:
-                st.markdown(f"**{label}:** N/A")
-    
-    with col3:
-        st.subheader("About")
-        st.write(f"**Sector:** {info.get('sector', 'N/A')}")
-        st.write(f"**Industry:** {info.get('industry', 'N/A')}")
-        st.write(f"**Website:** {info.get('website', 'N/A')}")
-        st.write(f"**Country:** {info.get('country', 'N/A')}")
+        with col2:
+            st.subheader("Performance (%)")
+            perf_labels = ["Daily", "MTD", "3M", "6M", "YTD", "1Y"]
+            for label in perf_labels:
+                value = returns.get(label, np.nan)
+                if pd.notna(value):
+                    color = "green" if value >= 0 else "red"
+                    st.markdown(f"**{label}:** <span style='color: {color}'>{value:+.2f}%</span>", unsafe_allow_html=True)
+                else:
+                    st.markdown(f"**{label}:** N/A")
+
+        with col3:
+            st.subheader("About")
+            st.write(f"**Sector:** {info.get('sector', 'N/A')}")
+            st.write(f"**Industry:** {info.get('industry', 'N/A')}")
+            st.write(f"**Website:** {info.get('website', 'N/A')}")
+            st.write(f"**Country:** {info.get('country', 'N/A')}")
     
     # Plotting
     if history_1y is not None and not history_1y.empty:
         st.subheader("1-Year Price Chart")
         fig = go.Figure()
         fig.add_trace(
-            go.Scatter(
-                x=history_1y.index,
-                y=history_1y["Close"],
-                mode="lines",
-                name="Close Price",
-            )
-        )
+                    go.Scatter(
+                        x=history_1y.index,
+                        y=history_1y["Close"],
+                        mode="lines",
+                        name="Close Price",
+                    )
+                )
         fig.update_layout(
             xaxis_title="Date",
             yaxis_title=f"Price ({info.get('currency', 'USD')})",
@@ -529,6 +541,45 @@ def display_stock_details(stock):
             xaxis_rangeslider_visible=False,
         )
         st.plotly_chart(fig, use_container_width=True, key=f"chart_{stock['symbol']}")
+
+def create_stock_summary_table(stock_data):
+    """Create a summary table with links to detailed sections."""
+    if not stock_data:
+        return
+    
+    st.markdown("### Stock Summary")
+    
+    # Create anchor for the summary table
+    st.markdown('<div id="summary_table"></div>', unsafe_allow_html=True)
+    
+    # Create table data
+    table_data = []
+    for stock in stock_data:
+        ticker = stock['symbol']
+        current_price = stock['current_price']
+        daily_return = stock['daily_return']
+        position = stock['position']
+        
+        # Format values
+        price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
+        daily_str = f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A"
+        position_str = f"{position:.1f}%" if pd.notna(position) else "N/A"
+        
+        # Create link to details
+        details_link = f'<a href="#stock_{ticker}" style="text-decoration: none;">🔍 Details</a>'
+        
+        table_data.append({
+            'Symbol': ticker,
+            'Price': price_str,
+            'Daily Return': daily_str,
+            '52W Position': position_str,
+            'Details': details_link
+        })
+    
+    # Convert to DataFrame and display
+    df = pd.DataFrame(table_data)
+    st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    st.markdown("---")
 
 # --- Main Application ---
 def main():
@@ -544,6 +595,7 @@ def main():
         "Choose Input Method",
         ["Manual Entry", "Kite Holdings Upload"]
     )
+    
     tickers = []
     if input_method == "Manual Entry":
         ticker_input = st.sidebar.text_area(
@@ -572,7 +624,7 @@ def main():
     if analyze_button:
         if not tickers:
             st.warning("Please enter ticker symbols or upload a Kite Holdings file.")
-
+        
         if os.getenv('MOCK_YF_DATA'):
             st.warning("Using mock data for stock data")
         
@@ -596,13 +648,17 @@ def main():
         # Sort stocks by position
         stock_data.sort(key=lambda x: float('-inf') if pd.isna(x['position']) else x['position'], reverse=True)
         
+        # Create summary table
+        create_stock_summary_table(stock_data)
+        
+        # Display detailed information for each stock
+        st.markdown("### Stock Details")
+        for stock in stock_data:
+            display_stock_info(stock)
+        
         # Prepare download data
         download_data = [format_stock_data(stock) for stock in stock_data]
         create_download_button(download_data)
-        
-        # Display stocks
-        for stock in stock_data:
-            display_stock_info(stock)
 
 if __name__ == "__main__":
     main()

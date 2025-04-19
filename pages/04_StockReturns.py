@@ -558,11 +558,14 @@ def create_stock_summary_table(stock_data):
         ticker = stock['symbol']
         current_price = stock['current_price']
         daily_return = stock['daily_return']
+        yearly_return = stock['yearly_return']
         position = stock['position']
+        returns = stock['returns']
         
         # Format values
         price_str = f"{current_price:.2f}" if pd.notna(current_price) else "N/A"
         daily_str = f"{daily_return:+.2f}%" if pd.notna(daily_return) else "N/A"
+        yearly_str = f"{yearly_return:+.2f}%" if pd.notna(yearly_return) else "N/A"
         position_str = f"{position:.1f}%" if pd.notna(position) else "N/A"
         
         # Create link to details
@@ -572,7 +575,14 @@ def create_stock_summary_table(stock_data):
             'Symbol': ticker,
             'Price': price_str,
             'Daily Return': daily_str,
+            '3M Return': returns.get("3M", np.nan),
+            '6M Return': returns.get("6M", np.nan),
+            'YTD Return': returns.get("YTD", np.nan),
+            '1Y Return': yearly_str,
+            # '3Y Return': returns.get("3Y", np.nan),
             '52W Position': position_str,
+            '52W Low': f"{stock['52w_low']:.2f}" if stock['52w_low'] is not None else "N/A",
+            '52W High': f"{stock['52w_high']:.2f}" if stock['52w_high'] is not None else "N/A",
             'Details': details_link
         })
     

@@ -571,24 +571,50 @@ def create_stock_summary_table(stock_data):
         # Create link to details
         details_link = f'<a href="#stock_{ticker}" style="text-decoration: none;">🔍 Details</a>'
         
-        table_data.append({
+        # Initialize row data
+        row_data = {
             'Symbol': ticker,
             'Price': price_str,
             'Daily Return': daily_str,
-            '3M Return': returns.get("3M", np.nan),
-            '6M Return': returns.get("6M", np.nan),
-            'YTD Return': returns.get("YTD", np.nan),
+            '3M Return': f"{returns.get('3M', np.nan):+.2f}%" if pd.notna(returns.get('3M', np.nan)) else "N/A",
+            '6M Return': f"{returns.get('6M', np.nan):+.2f}%" if pd.notna(returns.get('6M', np.nan)) else "N/A",
+            'YTD Return': f"{returns.get('YTD', np.nan):+.2f}%" if pd.notna(returns.get('YTD', np.nan)) else "N/A",
             '1Y Return': yearly_str,
-            # '3Y Return': returns.get("3Y", np.nan),
             '52W Position': position_str,
             '52W Low': f"{stock['52w_low']:.2f}" if stock['52w_low'] is not None else "N/A",
             '52W High': f"{stock['52w_high']:.2f}" if stock['52w_high'] is not None else "N/A",
-            'Details': details_link
-        })
+        }
+        
+        # Add Kite data if available
+        if st.session_state.kite_data is not None and ticker in st.session_state.kite_data['Instrument'].values:
+            kite_row = st.session_state.kite_data[st.session_state.kite_data['Instrument'] == ticker].iloc[0]
+            row_data.update({
+                'Quantity': int(kite_row['Qty.']),
+                'Avg Cost': format_money(kite_row['Avg. cost']),
+                'Invested': format_money(kite_row['Invested']),
+                'Current Value': format_money(kite_row['Cur. val']),
+                'P&L': format_money(kite_row['P&L']),
+                'P&L %': f"{float(kite_row['Net chg.']):+.2f}%"
+            })
+        
+        # Add details link
+        row_data['Details'] = details_link
+        table_data.append(row_data)
     
     # Convert to DataFrame and display
     df = pd.DataFrame(table_data)
-    st.markdown(df.to_html(escape=False, index=False), unsafe_allow_html=True)
+    
+    # Style the DataFrame
+    def color_returns(val):
+        if isinstance(val, str) and val != "N/A":
+            if '+' in val:
+                return 'color: green'
+            elif '-' in val:
+                return 'color: red'
+        return ''
+    
+    styled_df = df.style.applymap(color_returns, subset=['Daily Return', '3M Return', '6M Return', 'YTD Return', '1Y Return', 'P&L %'])
+    st.markdown(styled_df.to_html(escape=False, index=False), unsafe_allow_html=True)
     st.markdown("---")
 
 # --- Main Application ---

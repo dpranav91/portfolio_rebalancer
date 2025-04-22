@@ -322,7 +322,8 @@ def serialize_stock_data(stock):
         except (ValueError, AttributeError):
             return None
 
-    return {
+    # Base stock data
+    serialized = {
         'symbol': stock['symbol'],
         'current_price': extract_numeric(stock['current_price']),
         'daily_return': extract_numeric(stock['daily_return']),
@@ -331,12 +332,24 @@ def serialize_stock_data(stock):
         '52w_low': extract_numeric(stock['52w_low']),
         '52w_high': extract_numeric(stock['52w_high']),
         'returns': {k: extract_numeric(v) for k, v in stock['returns'].items()},
-        # 'info': {
-        #     k: (float(v) if isinstance(v, (int, float)) else str(v))
-        #     for k, v in stock['info'].items()
-        #     if isinstance(v, (int, float, str))
-        # }
     }
+
+    # Add Kite data if available
+    if st.session_state.kite_data is not None and stock['symbol'] in st.session_state.kite_data['Instrument'].values:
+        kite_row = st.session_state.kite_data[st.session_state.kite_data['Instrument'] == stock['symbol']].iloc[0]
+        serialized.update({
+            'kite_data': {
+                'quantity': int(kite_row['Qty.']),
+                'average_cost': float(kite_row['Avg. cost']),
+                'invested_amount': float(kite_row['Invested']),
+                'current_value': float(kite_row['Cur. val']),
+                'pnl': float(kite_row['P&L']),
+                'pnl_percentage': float(kite_row['Net chg.']),
+                'day_change': float(kite_row['Day chg.'])
+            }
+        })
+
+    return serialized
 
 def create_download_button(download_data):
     """Create download button in sidebar."""
